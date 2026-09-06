@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ReadBuddy</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">📖 ReadBuddy<span class="level-badge" id="levelBadge" title="点击重新选择水平">四级</span></div>
+    <nav class="nav">
+      <button data-view="read" class="nav-btn active">阅读</button>
+      <button data-view="vocab" class="nav-btn">生词本 <span class="count-pill" id="vocabCount">0</span></button>
+      <button data-view="settings" class="nav-btn">设置</button>
+    </nav>
+    <button id="themeToggle" class="icon-btn" title="深浅色切换">🌙</button>
+  </header>
+
+  <!-- ============ 阅读视图 ============ -->
+  <main id="view-read" class="view active">
+
+    <!-- 输入卡片 -->
+    <section id="inputCard" class="card">
+      <div class="tabs">
+        <button data-tab="photo" class="tab-btn" id="tabPhoto">📷 拍照识别</button>
+        <button data-tab="paste" class="tab-btn active" id="tabPaste">✍️ 粘贴文本</button>
+      </div>
+
+      <div id="photoPanel" class="tab-panel hidden">
+        <div id="dropzone" class="dropzone">
+          <strong>点击选择图片</strong> / 拖拽到此处 / 直接 <kbd>⌘V</kbd> 粘贴截图
+          <small>纸质书页拍照即可，支持多张连续页面，识别后可校对</small>
+        </div>
+        <input type="file" id="fileInput" accept="image/*" multiple hidden>
+        <div id="thumbs" class="thumbs"></div>
+        <div class="row">
+          <button id="btnTranscribe" class="primary" disabled>🔍 开始识别</button>
+          <span id="transcribeStatus" class="status"></span>
+        </div>
+      </div>
+
+      <div id="pastePanel" class="tab-panel">
+        <textarea id="articleInput" rows="12" placeholder="把英文文章全文粘贴到这里…&#10;&#10;也可以用左边「拍照识别」把纸质书页变成文字"></textarea>
+      </div>
+
+      <div class="row setting-row">
+        <label class="inline">我的水平
+          <select id="levelSelect"></select>
+        </label>
+        <span class="mini" id="thresholdHint"></span>
+        <span class="spacer"></span>
+        <button id="btnAnnotate" class="primary big">✨ 生成注释阅读</button>
+      </div>
+      <div id="annotateStatus" class="status"></div>
+    </section>
+
+    <!-- 阅读卡片 -->
+    <section id="readerCard" class="card reader hidden">
+      <div id="mockBanner" class="mock-banner hidden">⚠️ 当前为演示模式（未配置 API Key），释义为占位内容。到「设置」填入 Key 后可体验真实标注。</div>
+      <div class="reader-toolbar">
+        <button id="btnBack" class="ghost">← 返回</button>
+        <span class="mini" id="readerMeta"></span>
+        <span class="spacer"></span>
+        <label class="mini inline">注释密度
+          <select id="densitySelect">
+            <option value="first">仅首次直标</option>
+            <option value="all">全部直标</option>
+          </select>
+        </label>
+        <button id="btnExportPdf" class="ghost" type="button">📄 导出 PDF</button>
+        <span id="extraWords" class="extra-words"></span>
+      </div>
+      <article id="articleRender"></article>
+      <p class="hint">💡 点击任意单词可查词；对标注词点「认识」会永久静音，点「不认识」（需二次确认）会写入你的档案，今后所有文章都会预先标注它</p>
+    </section>
+
+    <!-- 历史 -->
+    <section id="historyCard" class="card">
+      <h2>历史文章</h2>
+      <div id="historyList" class="history-list"><p class="mini">暂无</p></div>
+    </section>
+  </main>
+
+  <!-- ============ 生词本视图 ============ -->
+  <main id="view-vocab" class="view">
+    <section class="card">
+      <div class="row">
+        <h2>我的生词本</h2>
+        <span class="spacer"></span>
+        <button id="btnExportVocab" class="ghost">📋 复制导出</button>
+      </div>
+      <p class="mini">阅读中点「不认识」的词会收录在这里，并在今后的每篇文章中自动预先标注</p>
+      <div id="vocabList"></div>
+    </section>
+  </main>
+
+  <!-- ============ 设置视图 ============ -->
+  <main id="view-settings" class="view">
+    <section class="card">
+      <h2>LLM 配置</h2>
+      <p class="mini">文本与视觉模型各自独立配置（OpenAI 兼容协议，可随时换供应商，如同换 ZCode 的 Provider）</p>
+
+      <div class="provider-block">
+        <h3>✍️ 文本模型 <span class="mini">（生词标注 / 点词查词）</span></h3>
+        <div class="row">
+          <label class="inline">驱动方式
+            <select id="txtMode">
+              <option value="openai">☁️ 云端 API（OpenAI 兼容）</option>
+              <option value="cli">💻 本机 Coding Agent</option>
+            </select>
+          </label>
+          <span class="mini">本机已配置好的 coding CLI 也能当引擎用，无需 API Key</span>
+        </div>
+        <div id="cliRow" class="row hidden">
+          <label class="inline">本机 Agent
+            <select id="cliAgent"></select>
+          </label>
+          <button id="btnRefreshAgents" class="ghost" type="button">🔄 重新检测</button>
+          <div id="cliAgentInfo" class="mini" style="flex-basis:100%"></div>
+        </div>
+        <div id="httpRows" class="form-grid">
+          <label>Base URL<input id="txtBaseUrl" placeholder="https://api.minimax.chat/v1/text/chatcompletion_v2"></label>
+          <label>API Key<input id="txtApiKey" type="password" placeholder="sk-…"></label>
+          <label>模型名<input id="txtModel" placeholder="minimax-m3"></label>
+        </div>
+        <div class="row">
+          <button id="btnTestText" class="ghost">测试连接</button>
+          <span id="testTextStatus" class="status"></span>
+        </div>
+      </div>
+
+      <div class="provider-block">
+        <h3>📷 视觉模型 <span class="mini">（拍照转录 / 视觉验收）</span></h3>
+        <div class="form-grid">
+          <label>Base URL<input id="visBaseUrl" placeholder="https://open.bigmodel.cn/api/paas/v4"></label>
+          <label>API Key<input id="visApiKey" type="password" placeholder="sk-…"></label>
+          <label>模型名<input id="visModel" placeholder="glm-5.3-flash"></label>
+        </div>
+        <div class="row">
+          <button id="btnTestVision" class="ghost">测试连接</button>
+          <span id="testVisionStatus" class="status"></span>
+        </div>
+      </div>
+
+      <div class="row">
+        <button id="btnSaveSettings" class="primary">保存配置</button>
+        <span id="saveSettingsStatus" class="status"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>我的英语水平</h2>
+      <div class="row setting-row">
+        <label class="inline">档位
+          <select id="levelSelect2"></select>
+        </label>
+        <span class="mini" id="thresholdHint2"></span>
+        <span class="spacer"></span>
+        <button id="btnQuiz" class="primary">🎯 60 秒认词小测（校准档位）</button>
+      </div>
+      <p class="mini" id="calibratedInfo"></p>
+      <div class="stats-row" id="statsRow"></div>
+    </section>
+
+    <section class="card">
+      <h2>数据管理</h2>
+      <div class="row">
+        <button id="btnExportData" class="ghost">导出档案</button>
+        <button id="btnImportData" class="ghost">导入档案</button>
+        <input type="file" id="importFile" accept="application/json" hidden>
+        <button id="btnClearKnown" class="ghost danger">清空已知词库</button>
+        <button id="btnClearHistory" class="ghost danger">清空历史</button>
+      </div>
+      <p class="mini">档案保存在本机 data/profile.json；历史与查词缓存在浏览器本地</p>
+    </section>
+  </main>
+
+  <!-- 点词查词卡片 -->
+  <div id="popover" class="popover hidden">
+    <div class="pw-head"><span id="pwWord"></span><span id="pwIpa"></span></div>
+    <div id="pwCommon" class="pw-line"></div>
+    <div id="pwContext" class="pw-line"></div>
+    <div class="pw-actions">
+      <button id="pwKnown" class="chip">✅ 认识</button>
+      <button id="pwUnknown" class="chip warn">❌ 不认识</button>
+    </div>
+    <div class="pw-tip mini" id="pwTip"></div>
+  </div>
+
+  <!-- 认词小测模态框 -->
+  <div id="quizModal" class="modal hidden">
+    <div class="modal-box">
+      <h2>🎯 认词小测</h2>
+      <p class="mini">勾选你<strong>认识</strong>的词（能说出主要意思就算认识）。不认识的不要勾，猜词会让校准失真。</p>
+      <div id="quizGrid" class="quiz-grid"></div>
+      <div class="row">
+        <button id="btnQuizCancel" class="ghost">取消</button>
+        <span class="spacer"></span>
+        <button id="btnQuizSubmit" class="primary">提交校准</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>

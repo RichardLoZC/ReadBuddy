@@ -1,0 +1,7 @@
+node_modules/
+data/profile.json
+data/llm-log.jsonl
+.zcode/
+.DS_Store
+*.log
+/tmp/

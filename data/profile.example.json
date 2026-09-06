@@ -1,0 +1,24 @@
+{
+  "_comment": "ReadBuddy 读者档案模板：复制为 data/profile.json 后按需填写；apiKey 只留在本机，请勿提交到任何仓库",
+  "level": "cet4",
+  "threshold": 16000,
+  "calibratedAt": null,
+  "settings": {
+    "textProvider": {
+      "kind": "openai",
+      "baseUrl": "https://api.minimaxi.com/v1/text/chatcompletion_v2",
+      "apiKey": "填你的文本模型 Key",
+      "model": "minimax-m3"
+    },
+    "visionProvider": {
+      "kind": "openai",
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "apiKey": "填你的视觉模型 Key",
+      "model": "glm-5.3-flash"
+    },
+    "density": "first"
+  },
+  "knownWords": {},
+  "unknownWords": {},
+  "stats": { "reads": 0, "lookups": 0 }
+}
