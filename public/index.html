@@ -118,6 +118,7 @@
           </label>
           <button id="btnRefreshAgents" class="ghost" type="button">🔄 重新检测</button>
           <div id="cliAgentInfo" class="mini" style="flex-basis:100%"></div>
+          <div id="cliAgentNone" class="status err hidden" style="flex-basis:100%">未检测到本机 coding CLI（支持 Claude Code / Codex CLI / OpenCode / ZCode）。安装并登录对应 CLI 后点「🔄 重新检测」。</div>
         </div>
         <div id="httpRows" class="form-grid">
           <label>Base URL<input id="txtBaseUrl" placeholder="https://api.minimax.chat/v1/text/chatcompletion_v2"></label>
@@ -152,12 +153,10 @@
     <section class="card">
       <h2>我的英语水平</h2>
       <div class="row setting-row">
-        <label class="inline">档位
+        <label class="inline">自评档位
           <select id="levelSelect2"></select>
         </label>
         <span class="mini" id="thresholdHint2"></span>
-        <span class="spacer"></span>
-        <button id="btnQuiz" class="primary">🎯 60 秒认词小测（校准档位）</button>
       </div>
       <p class="mini" id="calibratedInfo"></p>
       <div class="stats-row" id="statsRow"></div>
@@ -186,20 +185,6 @@
       <button id="pwUnknown" class="chip warn">❌ 不认识</button>
     </div>
     <div class="pw-tip mini" id="pwTip"></div>
-  </div>
-
-  <!-- 认词小测模态框 -->
-  <div id="quizModal" class="modal hidden">
-    <div class="modal-box">
-      <h2>🎯 认词小测</h2>
-      <p class="mini">勾选你<strong>认识</strong>的词（能说出主要意思就算认识）。不认识的不要勾，猜词会让校准失真。</p>
-      <div id="quizGrid" class="quiz-grid"></div>
-      <div class="row">
-        <button id="btnQuizCancel" class="ghost">取消</button>
-        <span class="spacer"></span>
-        <button id="btnQuizSubmit" class="primary">提交校准</button>
-      </div>
-    </div>
   </div>
 
   <div id="toast" class="toast hidden"></div>

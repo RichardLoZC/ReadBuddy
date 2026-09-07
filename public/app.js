@@ -25,7 +25,6 @@ const state = {
   images: [],          // 待识别图片 dataURL 池
   article: null,       // 当前文章 {id,title,text,list,extras,mock,annotations:Map,createdAt}
   popoverWord: null,   // 当前查词卡片对应的 {word, lemma, node}
-  quiz: null,
 };
 
 // ================= 档案 =================
@@ -52,16 +51,24 @@ function saveProfile() {
 // ③ 透明派生词族回溯（carefully→careful）④ 词频兜底（freq.json，仅大纲外词）
 const BAND_MAX = { zhongkao: 1, gaokao: 2, cet4: 3, cet6: 4, kaoyan: 5, ielts: 6, toefl: 7 };
 
-async function ensureWordData() {
-  if (state.freq) return;
-  const [freq, bands, ex] = await Promise.all([
-    fetch('/data/freq.json').then((r) => r.json()),
-    fetch('/data/wordbands.json').then((r) => r.json()),
-    fetch('/data/exchange.json').then((r) => r.json()),
-  ]);
-  state.freq = freq;
-  state.bands = bands;
-  state.exchange = ex;
+let wordDataPromise = null;
+function ensureWordData() {
+  if (state.freq) return Promise.resolve();
+  if (!wordDataPromise) {
+    wordDataPromise = Promise.all([
+      fetch('/data/freq.json').then((r) => r.json()),
+      fetch('/data/wordbands.json').then((r) => r.json()),
+      fetch('/data/exchange.json').then((r) => r.json()),
+    ]).then(([freq, bands, ex]) => {
+      state.freq = freq;
+      state.bands = bands;
+      state.exchange = ex;
+    }).catch((e) => {
+      wordDataPromise = null; // 失败允许下次重试
+      throw e;
+    });
+  }
+  return wordDataPromise;
 }
 
 // 词形归一：小写、曲引号、所有格、缩约词、不规则变形
@@ -309,7 +316,7 @@ async function doAnnotate() {
   const status = $('#annotateStatus');
   btn.disabled = true;
   status.className = 'status';
-  status.textContent = `已找到 ${words.length} 个候选生词，正在让 LLM 标注…（文本模型：${state.profile.settings.textProvider.model}）`;
+  status.textContent = `已找到 ${words.length} 个候选生词，正在标注…（${textEngineLabel()}）`;
 
   try {
     const res = await fetch('/api/annotate', {
@@ -506,9 +513,11 @@ function sentenceOf(node) {
   const p = node.closest('p');
   if (!p) return '';
   const text = p.textContent;
-  const word = node.dataset.word;
+  const word = node.dataset.word || '';
+  // 按词边界匹配，避免 "art" 命中 "start" 这类子串误配
+  const re = new RegExp(`(^|[^A-Za-z])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z]|$)`);
   for (const s of text.match(/[^.!?]+[.!?]*/g) || []) {
-    if (s.includes(word)) return s.trim();
+    if (re.test(s)) return s.trim();
   }
   return text.slice(0, 200);
 }
@@ -559,6 +568,8 @@ function openPopover(node) {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
         cacheLookup(word.toLowerCase(), data);
+        state.profile.stats.lookups = (state.profile.stats.lookups || 0) + 1;
+        saveProfile();
         if (state.popoverWord?.word === word) fillPopover({ ...data, source: 'fresh' });
         renderStats();
       } catch (e) {
@@ -592,6 +603,8 @@ function resetUnknownBtn() {
 function markKnown() {
   const cur = state.popoverWord;
   if (!cur) return;
+  const isNew = !state.profile.knownWords[cur.lemma]; // 状态真正变化才计校准证据，反复点同一词不重复计
+  if (isNew) recordEvidence(cur.word, true);
   state.profile.knownWords[cur.lemma] = Date.now();
   delete state.profile.unknownWords[cur.lemma];
   saveProfile();
@@ -613,9 +626,13 @@ function markUnknown() {
     setTimeout(() => { if (btn.dataset.armed) resetUnknownBtn(); }, 3000);
     return;
   }
-  const ipa = $('#pwIpa').textContent || '';
-  const common = ($('#pwCommon').textContent || '').replace(/^常见/, '');
-  const context = ($('#pwContext').textContent || '').replace(/^文中/, '');
+  const isNew = !state.profile.unknownWords[cur.lemma];
+  if (isNew) recordEvidence(cur.word, false);
+  // 查词还在路上时没有真实释义可存，宁缺毋滥（不把「正在查词…」写进生词本）
+  const loading = !!$('#pwCommon .pw-loading');
+  const ipa = loading ? '' : ($('#pwIpa').textContent || '');
+  const common = loading ? '' : ($('#pwCommon').textContent || '').replace(/^常见/, '');
+  const context = loading ? '' : ($('#pwContext').textContent || '').replace(/^文中/, '');
   state.profile.unknownWords[cur.lemma] = { ipa, common, context, addedAt: Date.now() };
   delete state.profile.knownWords[cur.lemma];
   saveProfile();
@@ -625,76 +642,58 @@ function markUnknown() {
   toast(`「${cur.word}」已加入生词本，今后每篇文章都会预先标注它`);
 }
 
-// ================= 认词小测（按考纲带位抽样） =================
+// ================= 行为校准：标注行为 → 动态调整有效档位 =================
+// 自评档位是基线；阅读中每点一次「认识/不认识」都构成证据：
+//   认识了高于当前档位的词 → 升档证据；当前档位及以下的词仍标生词 → 降档证据。
+// 证据累积到阈值后自动升降档，注释范围随之收窄/放宽。
 
-const QUIZ_LABELS = ['中考', '高考', '四级', '六级', '考研', '雅思', '托福'];
+const PROMOTE_N = 8;  // 高带位「认识」证据数达到即升档
+const DEMOTE_N = 5;   // 当前带位及以下「不认识」证据数达到即降档
 
-function openQuiz() {
-  ensureWordData().then(() => {
-    // 每个考纲带位抽 6 个「最早出现在该带位」的常见词（词频前 6 万内）
-    const pools = {};
-    for (const [w, b] of Object.entries(state.bands)) {
-      if (b >= 1 && b <= 7 && (state.freq[w] ?? 999999) <= 60000 && !state.profile.knownWords[w]) {
-        (pools[b] || (pools[b] = [])).push(w);
-      }
-    }
-    const items = [];
-    for (let b = 1; b <= 7; b++) {
-      const pool = pools[b] || [];
-      const picked = [];
-      while (picked.length < Math.min(6, pool.length)) {
-        const w = pool[Math.floor(Math.random() * pool.length)];
-        if (!picked.includes(w)) picked.push(w);
-      }
-      items.push({ band: b, words: picked });
-    }
-    state.quiz = items;
-
-    const grid = $('#quizGrid');
-    grid.innerHTML = '';
-    for (const { band, words } of items) {
-      const head = document.createElement('div');
-      head.className = 'quiz-band';
-      head.textContent = `${QUIZ_LABELS[band - 1]}词汇`;
-      grid.appendChild(head);
-      for (const w of words) {
-        const label = document.createElement('label');
-        label.className = 'quiz-item';
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.value = w;
-        label.append(cb, document.createTextNode(w));
-        grid.appendChild(label);
-      }
-    }
-    $('#quizModal').classList.remove('hidden');
-  });
+function recordEvidence(surface, known) {
+  if (!state.bands) return;
+  const { band } = classify(surface);
+  if (band === null) return; // 大纲外词没有带位，不参与校准
+  const p = state.profile;
+  const cal = p.calibration || (p.calibration = { knownAbove: [], unknownAtOrBelow: 0 });
+  const cur = BAND_MAX[p.level] ?? 3;
+  if (known && band > cur) cal.knownAbove.push(band);
+  else if (!known && band <= cur) cal.unknownAtOrBelow += 1;
+  else return;
+  evaluateCalibration();
 }
 
-function submitQuiz() {
-  const checked = new Set([...$('#quizGrid input:checked')].map((i) => i.value));
-  // 勾选的词直接进已知库
-  for (const w of checked) state.profile.knownWords[w] = Date.now();
-
-  // 从低带位往高带位走，掌握率跌破 50% 之前的最高带位即词汇边界
-  let band = 1;
-  for (const { band: b, words } of state.quiz) {
-    const hit = words.filter((w) => checked.has(w)).length;
-    const ratio = words.length ? hit / words.length : 1;
-    if (ratio >= 0.5) band = b;
-    else break;
+function evaluateCalibration() {
+  const p = state.profile;
+  const cal = p.calibration;
+  const cur = BAND_MAX[p.level] ?? 3;
+  const reset = () => { cal.knownAbove = []; cal.unknownAtOrBelow = 0; };
+  if ((cal.knownAbove || []).length >= PROMOTE_N) {
+    // 升档目标：已认识的高带位词的中位数（至少比当前高一档）
+    const sorted = [...cal.knownAbove].sort((a, b) => a - b);
+    const target = Math.min(7, Math.max(cur + 1, sorted[Math.floor(sorted.length / 2)]));
+    reset();
+    if (target !== cur) applyLevelAdjust(target, 'up');
+  } else if ((cal.unknownAtOrBelow || 0) >= DEMOTE_N) {
+    reset();
+    const target = Math.max(1, cur - 1);
+    if (target !== cur) applyLevelAdjust(target, 'down');
   }
+}
 
-  const level = LEVELS[band - 1];
-  state.profile.level = level.id;
-  state.profile.threshold = level.threshold; // 词频兜底阈值同步
-  state.profile.calibratedAt = new Date().toISOString();
+function applyLevelAdjust(band, dir) {
+  const p = state.profile;
+  const from = LEVELS.find((l) => l.id === p.level);
+  const to = LEVELS[band - 1];
+  p.level = to.id;
+  p.threshold = to.threshold;
+  p.adjustedAt = new Date().toISOString();
   saveProfile();
-
-  $('#quizModal').classList.add('hidden');
   refreshLevelUI();
   renderStats();
-  toast(`校准完成：你的词汇边界约在${level.label}（${QUIZ_LABELS[band - 1]}及以下考纲词不再标注）`);
+  toast(dir === 'up'
+    ? `你多次认识更高档位的词，水平已从「${from?.label || ''}」上调为「${to.label}」，注释范围随之收窄`
+    : `当前档位的词多次被你标为生词，水平已从「${from?.label || ''}」下调为「${to.label}」，注释范围随之放宽`);
 }
 
 // ================= 历史 =================
@@ -771,6 +770,7 @@ function renderVocab() {
     const b1 = document.createElement('button');
     b1.textContent = '已掌握';
     b1.onclick = () => {
+      recordEvidence(word, true);
       delete state.profile.unknownWords[word];
       state.profile.knownWords[word] = Date.now();
       saveProfile(); renderVocab(); renderVocabCount();
@@ -791,32 +791,44 @@ function renderVocab() {
 
 let localAgents = [];
 
+// 文本引擎展示名（CLI 模式显示 Agent 名，云端模式显示模型名）
+function textEngineLabel() {
+  const tp = state.profile.settings.textProvider || {};
+  if (tp.kind === 'cli') {
+    const a = localAgents.find((x) => x.id === tp.cli);
+    return `本机 Agent：${a ? a.label : tp.cli}`;
+  }
+  return `文本模型：${tp.model || '未配置'}`;
+}
+
 async function loadAgents() {
   try {
     const res = await fetch('/api/local-agents');
-    localAgents = await res.json();
+    const list = await res.json();
+    localAgents = Array.isArray(list) ? list : []; // 只含真实检测到的 CLI
   } catch { localAgents = []; }
   const sel = $('#cliAgent');
   const prev = sel.value;
-  sel.innerHTML = localAgents.map((a) =>
-    `<option value="${a.id}" ${a.available ? '' : 'disabled'}>${a.label}${a.available ? '' : '（未安装）'}</option>`
-  ).join('');
-  if (localAgents.some((a) => a.id === prev && a.available)) sel.value = prev;
-  else {
-    const first = localAgents.find((a) => a.available);
-    if (first) sel.value = first.id;
-  }
+  const savedCli = state.profile?.settings?.textProvider?.cli;
+  sel.innerHTML = localAgents.map((a) => `<option value="${a.id}">${a.label}</option>`).join('');
+  // 保留当前选择，其次回到已保存的选择，否则取第一个检测到的
+  const pick = [prev, savedCli].find((id) => localAgents.some((a) => a.id === id)) || localAgents[0]?.id || '';
+  sel.value = pick;
+  sel.disabled = !localAgents.length;
+  $('#cliAgentNone').classList.toggle('hidden', !!localAgents.length);
   updateCliAgentInfo();
 }
 
-// 展示所选 CLI 配置文件里真正生效的模型与思考强度
+// 展示所选 CLI 配置文件里真正生效的模型与思考强度（悬浮显示可执行文件路径）
 function updateCliAgentInfo() {
   const el = $('#cliAgentInfo');
   if (!el) return;
   const a = localAgents.find((x) => x.id === $('#cliAgent').value);
-  if (!a) { el.textContent = ''; return; }
-  if (!a.model) { el.textContent = '模型：未在配置中检测到（用 CLI 自身默认）'; return; }
-  el.textContent = `模型：${a.model}${a.thinking ? ` · 思考强度：${a.thinking}` : ' · 思考强度：未配置'}`;
+  if (!a) { el.textContent = ''; el.title = ''; return; }
+  const model = a.model ? `模型：${a.model}` : '模型：未在配置中检测到（用 CLI 自身默认）';
+  const think = a.thinking ? ` · 思考强度：${a.thinking}` : '';
+  el.textContent = `${model}${think}`;
+  el.title = a.path ? `可执行文件：${a.path}` : '';
 }
 
 function applyTxtMode(mode) {
@@ -827,7 +839,9 @@ function applyTxtMode(mode) {
 function fillSettings() {
   const s = state.profile.settings;
   const tp = s.textProvider || {};
-  const mode = tp.kind === 'cli' ? 'cli' : 'openai';
+  // 保存的 CLI 本机已一个都检测不到时，界面回退到云端模式（保存时以界面为准）
+  let mode = tp.kind === 'cli' ? 'cli' : 'openai';
+  if (mode === 'cli' && !localAgents.length) mode = 'openai';
   $('#txtMode').value = mode;
   applyTxtMode(mode);
   if (mode === 'cli' && tp.cli && localAgents.some((a) => a.id === tp.cli)) $('#cliAgent').value = tp.cli;
@@ -892,10 +906,11 @@ function renderStats() {
     [Object.keys(p.unknownWords || {}).length, '生词本'],
   ];
   $('#statsRow').innerHTML = boxes.map(([n, l]) => `<div class="stat-box"><div class="num">${n}</div><div class="lbl">${l}</div></div>`).join('');
-  const cal = p.calibratedAt
-    ? `上次校准：${new Date(p.calibratedAt).toLocaleString('zh-CN')}（${LEVELS.find((l) => l.id === p.level)?.label || p.level}档）`
-    : '还没做过认词小测——推荐做一次，档案会更准';
-  $('#calibratedInfo').textContent = cal;
+  const selfLabel = LEVELS.find((l) => l.id === p.selfLevel)?.label;
+  const curLabel = LEVELS.find((l) => l.id === p.level)?.label || p.level;
+  $('#calibratedInfo').textContent = selfLabel && selfLabel !== curLabel
+    ? `自评「${selfLabel}」· 已根据你的标注行为调整为「${curLabel}」${p.adjustedAt ? `（${new Date(p.adjustedAt).toLocaleDateString('zh-CN')}）` : ''}，注释范围随之变化；继续点「认识/不认识」还会持续微调`
+    : `自评档位「${curLabel}」。阅读中点「认识/不认识」的行为会持续校准你的真实水平，必要时自动升降档`;
 }
 
 // ================= 通用 UI =================
@@ -930,7 +945,7 @@ function refreshLevelUI() {
   const level = LEVELS.find((l) => l.id === p.level) || LEVELS[2];
   $('#levelBadge').textContent = level.label.replace(/（.*）/, '');
   for (const sel of [$('#levelSelect'), $('#levelSelect2')]) sel.value = p.level;
-  const hint = `${LEVELS.find((l) => l.id === p.level)?.label || ''}考纲内及常用词不标注，超纲生词才标注`;
+  const hint = `${LEVELS.find((l) => l.id === p.level)?.label || ''}考纲内及常用词不标注，超纲生词才标注；阅读中的「认识/不认识」会持续微调这一档位`;
   $('#thresholdHint').textContent = hint;
   $('#thresholdHint2').textContent = hint;
 }
@@ -938,7 +953,11 @@ function refreshLevelUI() {
 function onLevelChange(value) {
   const level = LEVELS.find((l) => l.id === value);
   if (!level) return;
+  // 自评即新的基线：覆盖之前的动态修正，行为证据重新累积
   state.profile.level = level.id;
+  state.profile.selfLevel = level.id;
+  state.profile.adjustedAt = null;
+  state.profile.calibration = { knownAbove: [], unknownAtOrBelow: 0 };
   state.profile.threshold = level.threshold;
   saveProfile();
   refreshLevelUI();
@@ -954,7 +973,7 @@ function applyTheme(theme) {
 
 async function init() {
   await loadProfile();
-  ensureWordData();
+  ensureWordData().catch((e) => console.warn('词汇分级数据加载失败', e));
 
   // 水平下拉
   for (const sel of [$('#levelSelect'), $('#levelSelect2')]) {
@@ -1008,11 +1027,6 @@ async function init() {
   $('#pwKnown').onclick = markKnown;
   $('#pwUnknown').onclick = markUnknown;
 
-  // 小测
-  $('#btnQuiz').onclick = openQuiz;
-  $('#btnQuizCancel').onclick = () => $('#quizModal').classList.add('hidden');
-  $('#btnQuizSubmit').onclick = submitQuiz;
-
   // 设置
   $('#btnSaveSettings').onclick = saveSettings;
   $('#btnTestText').onclick = () => testProvider('text');
@@ -1022,11 +1036,10 @@ async function init() {
   $('#btnRefreshAgents').onclick = async () => {
     const btn = $('#btnRefreshAgents');
     btn.disabled = true;
-    await loadAgents();
-    fillSettings();
+    await loadAgents(); // 只刷新 Agent 列表本身，不重置用户正在编辑的其他设置
     btn.disabled = false;
-    const found = localAgents.filter((a) => a.available).map((a) => a.label).join('、');
-    toast(found ? `检测到本机 Agent：${found}` : '没有检测到已安装的 coding CLI');
+    const found = localAgents.map((a) => a.label).join('、');
+    toast(found ? `检测到本机 Agent：${found}` : '没有检测到可用的本机 coding CLI（支持 Claude Code / Codex / OpenCode / ZCode）');
   };
 
   // 生词本

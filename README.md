@@ -68,9 +68,9 @@ npm run web      # 浏览器版，打开 http://127.0.0.1:3456
 | OpenCode | `opencode run …` |
 | ZCode | `zcode --prompt …` |
 
-选择 agent 后，下拉框下方会显示该 CLI **配置文件里真正生效的模型名与思考强度**（如 `模型：GLM-5.3-Flash · 思考强度：max`）：Claude Code 读 `~/.claude/settings.json` 的 `ANTHROPIC_MODEL` / `CLAUDE_CODE_EFFORT_LEVEL`，Codex 读 `~/.codex/config.toml` 的 `model` / `model_reasoning_effort`，OpenCode 与 ZCode 读各自 config 里 `provider/model` 格式的 `model` 及模型定义中的 `reasoning.defaultVariant`。
+检测是**真实发现**：先查 `which`/`where`，再扫描 npm / homebrew / cargo 等常见安装目录（GUI 双击启动时 PATH 很短也不漏检），下拉框只列出**真正找到可执行文件**的 CLI，没有装就一个都不会出现。选择 agent 后，下拉框下方会显示该 CLI **配置文件里真正生效的模型名与思考强度**（如 `模型：GLM-5.3-Flash · 思考强度：max`，悬浮可见可执行文件路径）：Claude Code 读 `~/.claude/settings.json` 的 `ANTHROPIC_MODEL` / `CLAUDE_CODE_EFFORT_LEVEL`，Codex 读 `~/.codex/config.toml` 的 `model` / `model_reasoning_effort`，OpenCode 与 ZCode 读各自 config 里 `provider/model` 格式的 `model` 及模型定义中的 `reasoning.defaultVariant`。
 
-标注与查词的提示词会原样发给所选 agent，输出经健壮 JSON 解析后进阅读页；「🔄 重新检测」可刷新已安装列表。适合把订阅制 coding agent 的余量拿来读书。拍照转录仍走视觉模型（云端 API）。
+标注与查词的提示词会原样发给所选 agent，输出经健壮 JSON 解析后进阅读页；「🔄 重新检测」可刷新列表（不会动你正在编辑的其他设置）。适合把订阅制 coding agent 的余量拿来读书。拍照转录仍走视觉模型（云端 API）。
 
 ## 功能
 
@@ -79,7 +79,7 @@ npm run web      # 浏览器版，打开 http://127.0.0.1:3456
 - **行内注释**：命中个人生词阈值的词，首次出现时在单词正下方常驻小字中文注释（常见义/文中义/音标）；重复出现改为虚线下划线；注释密度（仅首现/全部）可在设置切换
 - **点词查词**：点任意单词弹出查词卡（音标 + 常见义 + 文中义）
 - **认识 / 不认识**：点「认识」永久静音该词；点「不认识」需二次确认（防误触），确认后写入你的档案——**今后所有文章都会预先标注它**
-- **水平三层判定**：自选档位（中考/高考/四级/六级/考研/雅思/托福）→ 60 秒认词小测自动校准 → 阅读中「认识/不认识」持续修正
+- **水平自评 + 行为动态校准**：自选档位（中考/高考/四级/六级/考研/雅思/托福）作为基线；阅读中每点一次「认识/不认识」都构成证据——连续认识更高档位的词会自动升档（注释范围收窄），当前档位的词多次被标为生词会自动降档（注释范围放宽），一切以你的真实标注行为为准
 - **生词本**：所有「不认识」的词自动收录，可一键复制导出
 - **历史文章**：最近 30 篇，点击即重新打开
 - **📄 导出 PDF**：阅读页一键把带注释的文章导出为高可读性 A4 PDF（衬线排版、词下青绿小注），桌面版弹原生保存框，浏览器版走系统打印
@@ -100,7 +100,7 @@ npm run web      # 浏览器版，打开 http://127.0.0.1:3456
 npm run build-wordlist   # 从 ECDICT stardict.csv 生成 data/ 下三个 JSON（约 2MB）
 ```
 
-认词小测也改为按考纲带位抽样：七个带位各抽 6 词，掌握率跌破 50% 的带位即你的词汇边界。
+档位校准不再依赖小测：自评档位是基线，阅读中的「认识/不认识」标注行为会持续修正有效档位（升档证据：连续认识更高带位的词；降档证据：当前带位及以下的词多次被标为生词），注释范围随之动态收窄/放宽。
 
 ## 你的档案存在哪
 

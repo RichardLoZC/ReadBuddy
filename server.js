@@ -22,12 +22,14 @@ app.use('/data', express.static(DATA_DIR));
 
 const DEFAULT_PROFILE = {
   version: 1,
-  level: 'cet4',          // 自评档位（展示用）
-  threshold: 5000,        // 词频排名阈值：排名 > 此值的词视为潜在生词（小测可校准）
-  calibratedAt: null,     // 上次小测校准时间
+  level: 'cet4',          // 有效档位：自评为基线，随「认识/不认识」标注行为动态修正
+  selfLevel: 'cet4',      // 用户自评标签（重新自评即重置为新的基线）
+  adjustedAt: null,       // 上次行为修正时间
+  threshold: 5000,        // 词频排名阈值：排名 > 此值的词视为潜在生词
   knownWords: {},         // lemma -> 时间戳（这些词不再标注）
   unknownWords: {},       // lemma -> {ipa, common, context, addedAt}（永远标注 + 进生词本）
   stats: { reads: 0, lookups: 0 },
+  calibration: { knownAbove: [], unknownAtOrBelow: 0 },  // 行为校准证据（带位计数）
   settings: {
     textProvider: {       // 标注 / 查词
       baseUrl: 'https://api.minimax.chat/v1/text/chatcompletion_v2',
@@ -49,7 +51,9 @@ function readProfile() {
     return {
       ...DEFAULT_PROFILE,
       ...saved,
+      selfLevel: saved.selfLevel || saved.level || DEFAULT_PROFILE.selfLevel,
       stats: { ...DEFAULT_PROFILE.stats, ...(saved.stats || {}) },
+      calibration: { ...DEFAULT_PROFILE.calibration, ...(saved.calibration || {}) },
       settings: {
         ...DEFAULT_PROFILE.settings,
         ...(saved.settings || {}),
@@ -73,7 +77,10 @@ const LEVEL_LABELS = {
 
 function profileSummary(profile) {
   const label = LEVEL_LABELS[profile.level] || profile.level;
-  const cal = profile.calibratedAt ? '（已经认词小测校准）' : '（自估档位）';
+  const selfLabel = LEVEL_LABELS[profile.selfLevel];
+  const cal = selfLabel && selfLabel !== label
+    ? `（自评 ${selfLabel}，已按其标注单词的行为调整为 ${label}）`
+    : '（自评档位）';
   return `读者画像：中国英语学习者，水平约 ${label}${cal}，${label}及以下考纲词汇（中考/高考/四六级/考研/雅思/托福大纲）和常用词应已掌握，只有超出该档位的超纲词才可能不认识，释义请贴合此水平。`;
 }
 
@@ -257,6 +264,38 @@ function whichBin(bin) {
   });
 }
 
+// CLI 常见的真实安装目录。GUI 双击启动（Finder/资源管理器）拿到的 PATH 往往很短，
+// 只靠 which/where 会漏掉 npm / homebrew / cargo 装到这些位置的 CLI，逐个补齐探测。
+function cliSearchDirs() {
+  const home = homeDir();
+  const fromPath = String(process.env.PATH || '').split(path.delimiter);
+  const extra = IS_WIN
+    ? [path.join(home, 'AppData', 'Roaming', 'npm'), path.join(home, '.npm-global'), path.join(home, 'scoop', 'shims')]
+    : [
+        '/usr/local/bin', '/opt/homebrew/bin',
+        path.join(home, '.local', 'bin'), path.join(home, 'bin'),
+        path.join(home, '.npm-global', 'bin'), path.join(home, '.bun', 'bin'),
+        path.join(home, '.cargo', 'bin'), path.join(home, '.deno', 'bin'),
+      ];
+  return [...new Set([...fromPath, ...extra].filter(Boolean))];
+}
+
+// 真实发现某个 CLI 的可执行文件：先查 PATH，再扫常见安装目录；找不到返回 null
+async function resolveCliBin(bin) {
+  const byWhich = await whichBin(bin);
+  if (byWhich) return byWhich;
+  const exts = IS_WIN ? ['', '.exe', '.cmd', '.bat'] : [''];
+  for (const dir of cliSearchDirs()) {
+    for (const ext of exts) {
+      const f = path.join(dir, bin + ext);
+      try {
+        if (IS_WIN ? fs.existsSync(f) : fs.accessSync(f, fs.constants.X_OK) === undefined) return f;
+      } catch { /* 这个位置没有，继续 */ }
+    }
+  }
+  return null;
+}
+
 // ---------------- 本机 Agent 的模型 / 思考强度检测 ----------------
 // 各 CLI 真正调用的模型存在它自己的配置文件里，读出来给设置页展示：
 //   claude    ~/.claude/settings.json  env.ANTHROPIC_MODEL / env.CLAUDE_CODE_EFFORT_LEVEL
@@ -313,19 +352,22 @@ function agentModelInfo(id) {
   return { model: '', thinking: '' };
 }
 
-// Windows 下 npm 装的 CLI 是 .cmd 垫片，Node 无法直接 spawn，要经 cmd.exe 转发并手工转义引号
-function spawnCli(bin, args) {
+// Windows 下 npm 装的 CLI 是 .cmd 垫片，Node 无法直接 spawn，要经 cmd.exe 转发；
+// /s 语义下整体命令需包一层外引号（内层引号按 cmd 规则双写），且命令行里不能有换行
+function spawnCli(binFile, args) {
   if (!IS_WIN) {
-    return spawn(bin, args, { cwd: __dirname, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    return spawn(binFile, args, { cwd: __dirname, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
   }
+  const flat = (s) => String(s).replace(/[\r\n]+/g, ' ');
   const q = (s) => `"${String(s).replace(/"/g, '""')}"`;
-  return spawn('cmd.exe', ['/d', '/s', '/c', [bin, ...args].map(q).join(' ')], {
+  const cmdline = [binFile, ...args].map((a) => q(flat(a))).join(' ');
+  return spawn('cmd.exe', ['/d', '/s', '/c', `"${cmdline}"`], {
     cwd: __dirname, env: process.env, stdio: ['ignore', 'pipe', 'pipe'],
     windowsVerbatimArguments: true,
   });
 }
 
-function cliChat(provider, messages, { timeoutMs = 180000 } = {}) {
+async function cliChat(provider, messages, { timeoutMs = 180000 } = {}) {
   const agent = AGENT_CLIS.find((a) => a.id === provider.cli);
   if (!agent) throw new Error(`未知的本机 Agent：${provider.cli}`);
   const prompt = messages.map((m) => {
@@ -335,8 +377,10 @@ function cliChat(provider, messages, { timeoutMs = 180000 } = {}) {
       : Array.isArray(c) ? c.filter((x) => x?.type === 'text').map((x) => x.text).join('\n') : '';
     return m.role === 'system' ? `[系统指令]\n${text}` : text;
   }).filter(Boolean).join('\n\n');
+  const binFile = await resolveCliBin(agent.bin);
+  if (!binFile) throw new Error(`${agent.label} 已不可用（未在 PATH 与常见安装目录中检测到），请到设置页重新检测`);
   return new Promise((resolve, reject) => {
-    const child = spawnCli(agent.bin, agent.args(prompt));
+    const child = spawnCli(binFile, agent.args(prompt));
     let out = '';
     let err = '';
     const timer = setTimeout(() => {
@@ -374,14 +418,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------- 接口 ----------------
 
-// 检测本机可用的 coding agent（附带各自配置的模型名与思考强度）
+// 真实检测本机可用的 coding agent：只返回真正找到可执行文件的 CLI（附路径 + 配置里的模型/思考强度）
 app.get('/api/local-agents', async (_req, res) => {
-  const list = await Promise.all(AGENT_CLIS.map(async (a) => ({
-    id: a.id,
-    label: a.label,
-    available: !!(await whichBin(a.bin)),
-    ...agentModelInfo(a.id),
-  })));
+  const list = (await Promise.all(AGENT_CLIS.map(async (a) => {
+    const binFile = await resolveCliBin(a.bin);
+    return binFile ? { id: a.id, label: a.label, available: true, path: binFile, ...agentModelInfo(a.id) } : null;
+  }))).filter(Boolean);
   res.json(list);
 });
 
@@ -619,9 +661,7 @@ app.post('/api/lookup', async (req, res) => {
       { kind: 'lookup', maxTokens: 6000, temperature: 0.2, timeoutMs: 90000 },
     );
     const parsed = extractJSON(raw);
-    const p = readProfile();
-    p.stats.lookups = (p.stats.lookups || 0) + 1;
-    writeProfile(p);
+    // 查词计数由前端统计并随档案保存（服务端不再回写，避免被前端整档覆盖造成丢失）
     res.json({ ipa: parsed.ipa || '', common: parsed.common || '', context: parsed.context || parsed.common || '' });
   } catch (e) {
     if (e.code === 'NO_KEY') return res.status(400).json({ error: '尚未配置文本模型 API Key（默认 minimax-m3 / MiniMax）' });

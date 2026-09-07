@@ -277,27 +277,6 @@ textarea#articleInput {
 .pw-tip { margin-top: 8px; }
 .pw-loading { color: var(--ink-soft); font-size: 13px; padding: 6px 0; }
 
-/* ============ 模态框 / 小测 ============ */
-.modal {
-  position: fixed; inset: 0; z-index: 200;
-  background: rgba(20, 15, 5, 0.45);
-  display: flex; align-items: center; justify-content: center;
-}
-.modal-box {
-  background: var(--card);
-  border-radius: var(--radius);
-  padding: 24px 28px;
-  width: min(720px, 92vw);
-  max-height: 86vh;
-  overflow: auto;
-}
-.quiz-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 18px; margin: 14px 0; }
-.quiz-item { display: flex; align-items: center; gap: 8px; font-family: Georgia, serif; font-size: 16px; padding: 4px 6px; border-radius: 6px; }
-.quiz-item:hover { background: var(--accent-soft); }
-.quiz-item input { accent-color: var(--accent); }
-.quiz-band { grid-column: 1 / -1; font-size: 12px; color: var(--ink-soft); border-bottom: 1px dashed var(--line); margin-top: 10px; padding-bottom: 2px; }
-.quiz-band:first-child { margin-top: 0; }
-
 /* ============ 生词本 / 历史 ============ */
 .vocab-table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .vocab-table th, .vocab-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
